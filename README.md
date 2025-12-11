@@ -8,7 +8,7 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [한국어](./README.ko-KR.md)
 
-![Demo Screenshot](./assets/demo.png)
+![Demo Screenshot](./demo.png)
 
 ## ✨ Features
 
