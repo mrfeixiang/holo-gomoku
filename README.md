@@ -195,7 +195,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Contact
 
-- GitHub Issues: [Create an issue](https://github.com/yourusername/holographic-gomoku/issues)
+- GitHub Issues: [Create an issue](https://github.com/mrfeixiang/holographic-gomoku/issues)
 - Email: your.email@example.com
 
 ## 🌟 Star History
@@ -204,6 +204,6 @@ If you find this project useful, please consider giving it a ⭐!
 
 ---
 
-**Made with ❤️ by AI-assisted Development**
+**Made with ❤️ by Drbee with AI-assisted Development**
 
 *Think Different, Code Different*
