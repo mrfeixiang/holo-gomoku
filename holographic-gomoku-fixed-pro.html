@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Holographic Gesture Gomoku - Fixed Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        #overlay-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        #video-feed { position: absolute; top: 10px; left: 10px; width: 160px; height: 120px; z-index: 3; transform: scaleX(-1); border: 2px solid #00ffff; opacity: 0.8; border-radius: 8px; box-shadow: 0 0 20px #00ffff; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #00ffff; font-size: 24px; z-index: 10; text-shadow: 0 0 20px #00ffff; text-align: center; }
+        #hud { position: absolute; bottom: 20px; left: 20px; color: #00ffff; z-index: 4; font-size: 14px; background: rgba(0, 20, 40, 0.8); padding: 15px; border: 2px solid #00ffff; border-radius: 10px; box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); }
+        #controls { position: absolute; bottom: 20px; right: 20px; color: #00ffff; z-index: 4; font-size: 13px; background: rgba(0, 20, 40, 0.8); padding: 15px; border: 2px solid #00ffff; border-radius: 10px; max-width: 250px; }
+        .hidden { display: none !important; }
+        .status-player { color: #00ffff !important; text-shadow: 0 0 10px #00ffff; }
+        .status-ai { color: #ff0033 !important; text-shadow: 0 0 10px #ff0033; }
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">
+        🚀 Initializing Neural Interface...<br>
+        <small style="font-size:14px; color: #aaa; margin-top: 10px; display: block;">Please allow camera access</small>
+    </div>
+    
+    <video id="video-feed" autoplay playsinline muted></video>
+    <canvas id="overlay-canvas"></canvas>
+    <div id="canvas-container"></div>
+    
+    <div id="hud">
+        <div style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">🎮 GAME STATUS</div>
+        Status: <span id="status-text" class="status-player">System Booting...</span><br>
+        Gesture: <span id="gesture-text">Waiting...</span><br>
+        <div style="margin-top: 8px; font-size: 11px; opacity: 0.7;">
+            Player: <span style="color: #00ffff;">●</span> Cyan (Sphere) | 
+            AI: <span style="color: #ff0033;">■</span> Red (Cube)
+        </div>
+    </div>
+    
+    <div id="controls">
+        <div style="font-weight: bold; margin-bottom: 8px;">✋ GESTURE CONTROLS</div>
+        <div style="font-size: 12px; line-height: 1.6;">
+            👆 Index finger controls cursor<br>
+            🤏 Pinch thumb + index to place<br>
+            🧲 Distance &lt; 10% = Magnetic Lock<br>
+            ⏱️ Hold pinch 100ms to confirm
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, composer;
+        let handLandmarker, video;
+        let boardGrid = [];
+        let pieces = [];
+        let cursorMesh, lockIndicator;
+        let shockwaves = [];
+        let lasers = [];
+        let particles = [];
+        
+        // 游戏状态
+        const BOARD_SIZE = 15;
+        const CELL_SIZE = 2; // 3D世界单位
+        let gameBoard = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(0)); // 0:空, 1:玩家, 2:AI
+        let isPlayerTurn = true;
+        let lastPinchState = false;
+        let pinchStartTime = 0;
+        
+        // 颜色常量
+        const CYAN = 0x00ffff;
+        const RED = 0xee0022;  // 更纯正的红色，避免过度曝光
+
+        // 初始化
+        async function init() {
+            console.log('🚀 ===== INITIALIZATION START =====');
+            setupScene();
+            setupPostProcessing();
+            createBoard();
+            createCursor();
+            await setupMediaPipe();
+            
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('status-text').innerText = "Active - Your Turn!";
+            
+            console.log('✅ Initialization complete!');
+            animate();
+        }
+
+        // --- Three.js 场景设置 ---
+        function setupScene() {
+            console.log('📦 Setting up 3D scene...');
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            
+            // 深空背景 - 减少雾效以提高清晰度
+            scene.fog = new THREE.FogExp2(0x000510, 0.01);  // 从0.015降低到0.01
+            scene.background = new THREE.Color(0x000510);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 40, 30);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // 更强的照明
+            const ambientLight = new THREE.AmbientLight(0x404040, 3);
+            scene.add(ambientLight);
+            
+            const dirLight1 = new THREE.DirectionalLight(0xffffff, 2);
+            dirLight1.position.set(10, 25, 10);
+            scene.add(dirLight1);
+            
+            const dirLight2 = new THREE.DirectionalLight(0x0088ff, 1);
+            dirLight2.position.set(-10, 20, -10);
+            scene.add(dirLight2);
+
+            // 更美观的网格设计
+            const gridSize = BOARD_SIZE * CELL_SIZE;
+            const divisions = BOARD_SIZE;
+            
+            // 主网格线（更亮、更粗）
+            const gridHelper = new THREE.GridHelper(gridSize, divisions, CYAN, 0x003344);
+            gridHelper.material.opacity = 0.8;
+            gridHelper.material.transparent = true;
+            scene.add(gridHelper);
+            
+            // 添加次级网格线（细密的辅助线）
+            const subGridHelper = new THREE.GridHelper(gridSize, divisions * 3, 0x002233, 0x001122);
+            subGridHelper.material.opacity = 0.3;
+            subGridHelper.material.transparent = true;
+            subGridHelper.position.y = -0.01;
+            scene.add(subGridHelper);
+            
+            // 棋盘外框加强
+            const borderMaterial = new THREE.LineBasicMaterial({ 
+                color: CYAN, 
+                linewidth: 2,
+                transparent: true,
+                opacity: 1
+            });
+            const borderSize = gridSize / 2;
+            const borderPoints = [
+                new THREE.Vector3(-borderSize, 0, -borderSize),
+                new THREE.Vector3(borderSize, 0, -borderSize),
+                new THREE.Vector3(borderSize, 0, borderSize),
+                new THREE.Vector3(-borderSize, 0, borderSize),
+                new THREE.Vector3(-borderSize, 0, -borderSize)
+            ];
+            const borderGeometry = new THREE.BufferGeometry().setFromPoints(borderPoints);
+            const borderLine = new THREE.Line(borderGeometry, borderMaterial);
+            borderLine.position.y = 0.02;
+            scene.add(borderLine);
+            
+            // 添加内框装饰
+            const innerBorderSize = borderSize * 0.95;
+            const innerBorderPoints = [
+                new THREE.Vector3(-innerBorderSize, 0, -innerBorderSize),
+                new THREE.Vector3(innerBorderSize, 0, -innerBorderSize),
+                new THREE.Vector3(innerBorderSize, 0, innerBorderSize),
+                new THREE.Vector3(-innerBorderSize, 0, innerBorderSize),
+                new THREE.Vector3(-innerBorderSize, 0, -innerBorderSize)
+            ];
+            const innerBorderGeometry = new THREE.BufferGeometry().setFromPoints(innerBorderPoints);
+            const innerBorderMaterial = new THREE.LineBasicMaterial({ 
+                color: CYAN, 
+                linewidth: 1,
+                transparent: true,
+                opacity: 0.5
+            });
+            const innerBorderLine = new THREE.Line(innerBorderGeometry, innerBorderMaterial);
+            innerBorderLine.position.y = 0.01;
+            scene.add(innerBorderLine);
+
+            window.addEventListener('resize', onWindowResize);
+            console.log('✅ Scene setup complete');
+        }
+
+        // --- 辉光特效 ---
+        function setupPostProcessing() {
+            console.log('✨ Setting up bloom effects...');
+            const renderScene = new RenderPass(scene, camera);
+            
+            // 调整Bloom参数：降低强度避免过度曝光
+            const bloomPass = new UnrealBloomPass(
+                new THREE.Vector2(window.innerWidth, window.innerHeight), 
+                0.8,  // 强度从2.0降低到0.8
+                0.4,  // 半径从0.6降低到0.4
+                0.5   // 阈值从0.3提高到0.5（减少发光物体）
+            );
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+            console.log('✅ Bloom effects ready');
+        }
+
+        function createBoard() {
+            // 美观的纯线条棋盘设计，无点标记
+            console.log('🎨 Creating elegant board design...');
+        }
+
+        function createCursor() {
+            console.log('🎯 Creating cursor...');
+            // 外圈
+            const geometry = new THREE.RingGeometry(0.9, 1.1, 32);
+            const material = new THREE.MeshBasicMaterial({ 
+                color: CYAN, 
+                side: THREE.DoubleSide, 
+                transparent: true, 
+                opacity: 0.9 
+            });
+            cursorMesh = new THREE.Mesh(geometry, material);
+            cursorMesh.rotation.x = -Math.PI / 2;
+            cursorMesh.visible = false;
+            scene.add(cursorMesh);
+            
+            // 内圈
+            const innerGeo = new THREE.RingGeometry(0.6, 0.8, 32);
+            const innerMat = new THREE.MeshBasicMaterial({ 
+                color: CYAN, 
+                side: THREE.DoubleSide, 
+                transparent: true, 
+                opacity: 0.5 
+            });
+            const innerRing = new THREE.Mesh(innerGeo, innerMat);
+            innerRing.rotation.x = -Math.PI / 2;
+            innerRing.position.y = 0.05;
+            cursorMesh.add(innerRing);
+
+            // 锁定指示器
+            const lockGeo = new THREE.CircleGeometry(0.4, 16);
+            const lockMat = new THREE.MeshBasicMaterial({ color: RED });
+            lockIndicator = new THREE.Mesh(lockGeo, lockMat);
+            lockIndicator.rotation.x = -Math.PI / 2;
+            lockIndicator.position.y = 0.1;
+            cursorMesh.add(lockIndicator);
+            lockIndicator.visible = false;
+            
+            console.log('✅ Cursor created');
+        }
+
+        // --- MediaPipe 设置 ---
+        async function setupMediaPipe() {
+            console.log('📹 Setting up MediaPipe...');
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+
+                video = document.getElementById('video-feed');
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        } 
+                    });
+                    video.srcObject = stream;
+                    await new Promise((resolve) => { video.onloadedmetadata = () => resolve(); });
+                    video.play();
+                    console.log('✅ Camera initialized');
+                } else {
+                    alert("Camera not available!");
+                }
+            } catch (error) {
+                console.error('❌ MediaPipe setup failed:', error);
+                alert('Camera initialization failed. Please check permissions.');
+            }
+        }
+
+        // --- 游戏逻辑：落子 ---
+        function placePiece(gx, gz, isPlayer) {
+            console.log(`\n🎮 ===== PLACING PIECE =====`);
+            console.log(`   Player: ${isPlayer ? 'Human (Cyan)' : 'AI (Red)'}`);
+            console.log(`   Grid position: [${gx}, ${gz}]`);
+            console.log(`   Board status: ${gameBoard[gx][gz]}`);
+            
+            if (gameBoard[gx][gz] !== 0) {
+                console.log('❌ Position occupied!');
+                return;
+            }
+
+            gameBoard[gx][gz] = isPlayer ? 1 : 2;
+            console.log('✅ Board updated');
+
+            // 计算世界坐标
+            const offset = (BOARD_SIZE * CELL_SIZE) / 2 - (CELL_SIZE / 2);
+            const wx = gx * CELL_SIZE - offset;
+            const wz = gz * CELL_SIZE - offset;
+            console.log(`   World position: (${wx.toFixed(2)}, ${wz.toFixed(2)})`);
+
+            // 创建棋子
+            let geometry, color, pieceName;
+            
+            if (isPlayer) {
+                // 玩家：青色球体
+                geometry = new THREE.SphereGeometry(0.9, 32, 32);
+                color = CYAN;
+                pieceName = 'CYAN_SPHERE';
+            } else {
+                // AI：红色立方体（降低发光避免过度曝光）
+                geometry = new THREE.BoxGeometry(1.6, 1.6, 1.6);
+                color = RED;
+                pieceName = 'RED_CUBE';
+            }
+            
+            const material = new THREE.MeshStandardMaterial({ 
+                color: color, 
+                emissive: color, 
+                emissiveIntensity: isPlayer ? 1.2 : 1.8,  // AI从3.5降低到1.8
+                roughness: 0.2,
+                metalness: 0.8
+            });
+            
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(wx, isPlayer ? 0.9 : 1.2, wz);
+            mesh.name = pieceName;
+            
+            // 降低点光源强度
+            const lightIntensity = isPlayer ? 6 : 10;  // AI从20降低到10
+            const lightDistance = isPlayer ? 8 : 12;   // AI从15降低到12
+            const pointLight = new THREE.PointLight(color, lightIntensity, lightDistance);
+            pointLight.position.set(0, 0, 0);
+            mesh.add(pointLight);
+            
+            // 降低外发光强度
+            const glowSize = isPlayer ? 1.1 : 1.8;     // AI从2.0降低到1.8
+            const glowGeo = isPlayer ? 
+                new THREE.SphereGeometry(glowSize, 16, 16) : 
+                new THREE.BoxGeometry(glowSize, glowSize, glowSize);
+            const glowMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: isPlayer ? 0.25 : 0.35,        // AI从0.6降低到0.35
+                side: THREE.BackSide
+            });
+            const glow = new THREE.Mesh(glowGeo, glowMat);
+            mesh.add(glow);
+            
+            scene.add(mesh);
+            pieces.push({ mesh: mesh, glow: glow, isRed: !isPlayer });
+            
+            console.log(`✅ ${pieceName} created and added to scene`);
+            console.log(`   Total pieces: ${pieces.length}`);
+            console.log(`   Scene children: ${scene.children.length}`);
+
+            // 特效
+            if (isPlayer) {
+                createShockwave(wx, wz, CYAN);
+                createParticleBurst(wx, wz, CYAN);
+            } else {
+                createOrbitalLaser(wx, wz);
+                setTimeout(() => {
+                    createShockwave(wx, wz, RED);
+                    createParticleBurst(wx, wz, RED);
+                }, 600);
+            }
+
+            // 检查胜利（简化版）
+            if (checkWin(gx, gz, isPlayer ? 1 : 2)) {
+                console.log(`🏆 ${isPlayer ? 'PLAYER' : 'AI'} WINS!`);
+                setTimeout(() => {
+                    alert(isPlayer ? '🎉 You Win!' : '💀 AI Wins!');
+                    location.reload();
+                }, 1000);
+                return;
+            }
+
+            // 轮换回合
+            isPlayerTurn = !isPlayerTurn;
+            updateStatus();
+
+            if (!isPlayerTurn) {
+                setTimeout(aiMove, 1200);
+            }
+            
+            console.log('🎮 ===== PIECE PLACEMENT COMPLETE =====\n');
+        }
+
+        function updateStatus() {
+            const statusEl = document.getElementById('status-text');
+            if (isPlayerTurn) {
+                statusEl.innerText = "Your Turn - Place Cyan Piece";
+                statusEl.className = 'status-player';
+            } else {
+                statusEl.innerText = "AI Thinking...";
+                statusEl.className = 'status-ai';
+            }
+        }
+
+        // --- AI 逻辑 ---
+        function aiMove() {
+            console.log('\n🤖 ===== AI TURN =====');
+            let bestScore = -Infinity;
+            let move = null;
+            
+            for(let x = 0; x < BOARD_SIZE; x++) {
+                for(let z = 0; z < BOARD_SIZE; z++) {
+                    if(gameBoard[x][z] === 0) {
+                        let score = -Math.abs(x - 7) - Math.abs(z - 7); 
+                        score += Math.random() * 3;
+                        
+                        // 简单防守：检查周围是否有玩家棋子
+                        for (let dx = -1; dx <= 1; dx++) {
+                            for (let dz = -1; dz <= 1; dz++) {
+                                const nx = x + dx;
+                                const nz = z + dz;
+                                if (nx >= 0 && nx < BOARD_SIZE && nz >= 0 && nz < BOARD_SIZE) {
+                                    if (gameBoard[nx][nz] === 1) score += 5;
+                                }
+                            }
+                        }
+                        
+                        if(score > bestScore) {
+                            bestScore = score;
+                            move = {x, z};
+                        }
+                    }
+                }
+            }
+
+            if(move) {
+                console.log(`✅ AI chose position [${move.x}, ${move.z}]`);
+                placePiece(move.x, move.z, false);
+            }
+        }
+
+        // --- 胜利检查 ---
+        function checkWin(x, y, player) {
+            const directions = [[1,0], [0,1], [1,1], [1,-1]];
+            
+            for (let [dx, dy] of directions) {
+                let count = 1;
+                
+                for (let i = 1; i < 5; i++) {
+                    const nx = x + i * dx;
+                    const ny = y + i * dy;
+                    if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && 
+                        gameBoard[nx][ny] === player) {
+                        count++;
+                    } else break;
+                }
+                
+                for (let i = 1; i < 5; i++) {
+                    const nx = x - i * dx;
+                    const ny = y - i * dy;
+                    if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE && 
+                        gameBoard[nx][ny] === player) {
+                        count++;
+                    } else break;
+                }
+                
+                if (count >= 5) return true;
+            }
+            return false;
+        }
+
+        // --- 特效系统 ---
+        function createShockwave(x, z, colorHex) {
+            for (let i = 0; i < 3; i++) {
+                setTimeout(() => {
+                    const geometry = new THREE.RingGeometry(0.5, 0.7, 32);
+                    const material = new THREE.MeshBasicMaterial({ 
+                        color: colorHex, 
+                        transparent: true, 
+                        side: THREE.DoubleSide,
+                        opacity: 0.6  // 从0.8降低到0.6
+                    });
+                    const wave = new THREE.Mesh(geometry, material);
+                    wave.position.set(x, 0.1 + i * 0.05, z);
+                    wave.rotation.x = -Math.PI / 2;
+                    scene.add(wave);
+                    shockwaves.push({ mesh: wave, scale: 1, opacity: 0.6, speed: 0.08 + i * 0.03 });
+                }, i * 100);
+            }
+        }
+
+        function createParticleBurst(x, z, colorHex) {
+            for (let i = 0; i < 12; i++) {  // 从15减少到12
+                const pGeo = new THREE.SphereGeometry(0.06, 8, 8);  // 从0.08减小到0.06
+                const pMat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.8 });
+                const particle = new THREE.Mesh(pGeo, pMat);
+                particle.position.set(x, 1, z);
+                
+                const angle = (Math.PI * 2 * i) / 12;
+                const speed = 0.06 + Math.random() * 0.06;
+                
+                scene.add(particle);
+                particles.push({
+                    mesh: particle,
+                    velocity: {
+                        x: Math.cos(angle) * speed,
+                        y: Math.random() * 0.12,
+                        z: Math.sin(angle) * speed
+                    },
+                    life: 1
+                });
+            }
+        }
+
+        function createOrbitalLaser(x, z) {
+            console.log(`⚡ Creating laser at (${x.toFixed(2)}, ${z.toFixed(2)})`);
+            
+            const geometry = new THREE.CylinderGeometry(0.25, 0.25, 50, 16);
+            const material = new THREE.MeshBasicMaterial({ 
+                color: RED, 
+                transparent: true, 
+                opacity: 0.8  // 降低透明度
+            });
+            const laser = new THREE.Mesh(geometry, material);
+            laser.position.set(x, 25, z);
+            
+            // 降低外发光强度
+            const glowGeo = new THREE.CylinderGeometry(0.35, 0.35, 50, 16);
+            const glowMat = new THREE.MeshBasicMaterial({
+                color: RED,
+                transparent: true,
+                opacity: 0.4,  // 从0.6降低到0.4
+                side: THREE.BackSide
+            });
+            const glowLaser = new THREE.Mesh(glowGeo, glowMat);
+            laser.add(glowLaser);
+            
+            // 降低光源强度
+            const light = new THREE.PointLight(RED, 15, 30);  // 从30降低到15，范围从40降到30
+            light.position.set(x, 25, z);
+            scene.add(light);
+            
+            scene.add(laser);
+            lasers.push({ mesh: laser, light: light, life: 1.0, speed: 0.03 });
+            
+            console.log('✅ Laser created');
+        }
+
+        // --- 主循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = Date.now() * 0.001;
+
+            // 1. MediaPipe 检测
+            if (video && video.readyState >= 2 && handLandmarker) {
+                let startTimeMs = performance.now();
+                const results = handLandmarker.detectForVideo(video, startTimeMs);
+                
+                draw2DSkeleton(results);
+
+                if (results.landmarks.length > 0 && isPlayerTurn) {
+                    const landmarks = results.landmarks[0];
+                    const indexTip = landmarks[8];
+                    const thumbTip = landmarks[4];
+
+                    // 映射手势坐标（镜像修正）
+                    const boardWidthWorld = BOARD_SIZE * CELL_SIZE;
+                    
+                    // 修正：使用 (1 - x) 实现完全镜像
+                    const mapX = ((1 - indexTip.x) - 0.5) * boardWidthWorld * 1.3;
+                    const mapZ = (indexTip.y - 0.5) * boardWidthWorld * 1.2;
+
+                    // 限制范围
+                    const limit = (BOARD_SIZE * CELL_SIZE) / 2;
+                    const clampedX = Math.max(-limit, Math.min(limit, mapX));
+                    const clampedZ = Math.max(-limit, Math.min(limit, mapZ));
+
+                    // 转换为网格索引
+                    const offset = (BOARD_SIZE * CELL_SIZE) / 2 - (CELL_SIZE / 2);
+                    const gx = Math.max(0, Math.min(BOARD_SIZE - 1, Math.round((clampedX + offset) / CELL_SIZE)));
+                    const gz = Math.max(0, Math.min(BOARD_SIZE - 1, Math.round((clampedZ + offset) / CELL_SIZE)));
+
+                    // 吸附后的世界坐标
+                    const snapWx = gx * CELL_SIZE - offset;
+                    const snapWz = gz * CELL_SIZE - offset;
+
+                    cursorMesh.visible = true;
+                    
+                    // 捏合检测
+                    const dx = indexTip.x - thumbTip.x;
+                    const dy = indexTip.y - thumbTip.y;
+                    const dz = indexTip.z - thumbTip.z;
+                    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    
+                    const isPinching = dist < 0.05;
+                    const isNearPinch = dist < 0.1;
+                    
+                    if (isNearPinch) {
+                        // 磁吸锁定
+                        cursorMesh.position.set(snapWx, 0.15, snapWz);
+                        document.getElementById('gesture-text').innerText = isPinching ? 
+                            "🎯 PINCH LOCKED - Placing..." : "🧲 Magnetic Lock Active";
+                        lockIndicator.visible = isPinching;
+
+                        if (isPinching && !lastPinchState) {
+                            pinchStartTime = Date.now();
+                        }
+                        
+                        if (isPinching && lastPinchState && (Date.now() - pinchStartTime > 100)) {
+                            if (gameBoard[gx][gz] === 0) {
+                                placePiece(gx, gz, true);
+                                lastPinchState = false;
+                                pinchStartTime = Date.now() + 1000;
+                            }
+                        }
+                    } else {
+                        // 自由移动
+                        cursorMesh.position.set(clampedX, 0.5, clampedZ);
+                        lockIndicator.visible = false;
+                        document.getElementById('gesture-text').innerText = "👆 Moving cursor...";
+                    }
+                    
+                    lastPinchState = isPinching;
+                }
+            }
+
+            // 2. 光标动画
+            if (cursorMesh.visible) {
+                const pulse = Math.sin(time * 3) * 0.15 + 1;
+                cursorMesh.scale.set(pulse, pulse, pulse);
+                cursorMesh.rotation.z += 0.02;
+            }
+
+            // 3. 棋子发光动画
+            pieces.forEach(piece => {
+                if (piece.glow) {
+                    const basePulse = piece.isRed ? 0.4 : 0.25;  // 降低基础脉冲
+                    const pulseAmount = piece.isRed ? 0.2 : 0.15;  // 降低脉冲幅度
+                    const glowPulse = Math.sin(time * 2) * pulseAmount + basePulse;
+                    piece.glow.material.opacity = glowPulse;
+                    
+                    if (piece.isRed) {
+                        piece.mesh.rotation.y += 0.01;
+                    }
+                }
+            });
+
+            // 4. 震波
+            for (let i = shockwaves.length - 1; i >= 0; i--) {
+                const sw = shockwaves[i];
+                sw.scale += sw.speed;
+                sw.opacity -= 0.025;
+                sw.mesh.scale.set(sw.scale, sw.scale, sw.scale);
+                sw.mesh.material.opacity = sw.opacity;
+                if (sw.opacity <= 0) {
+                    scene.remove(sw.mesh);
+                    shockwaves.splice(i, 1);
+                }
+            }
+
+            // 5. 激光
+            for (let i = lasers.length - 1; i >= 0; i--) {
+                const l = lasers[i];
+                l.mesh.position.y -= l.speed * 60;
+                l.light.position.y = l.mesh.position.y;
+                l.speed += 0.001;
+                l.life -= 0.015;
+                l.mesh.material.opacity = l.life * 0.8;
+                
+                const pulse = Math.sin(time * 20) * 0.15 + 1;
+                l.light.intensity = 12 * pulse * l.life;  // 从30降低到12
+                
+                if (l.life <= 0 || l.mesh.position.y < 0) {
+                    scene.remove(l.mesh);
+                    scene.remove(l.light);
+                    lasers.splice(i, 1);
+                }
+            }
+
+            // 6. 粒子
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.mesh.position.x += p.velocity.x;
+                p.mesh.position.y += p.velocity.y;
+                p.mesh.position.z += p.velocity.z;
+                p.velocity.y -= 0.005;
+                p.life -= 0.025;  // 加快衰减速度
+                p.mesh.material.opacity = p.life * 0.8;  // 降低最大透明度
+                
+                if (p.life <= 0) {
+                    scene.remove(p.mesh);
+                    particles.splice(i, 1);
+                }
+            }
+
+            composer.render();
+        }
+
+        // --- 2D骨骼绘制 ---
+        const canvas2d = document.getElementById('overlay-canvas');
+        const ctx = canvas2d.getContext('2d');
+        
+        function draw2DSkeleton(results) {
+            canvas2d.width = window.innerWidth;
+            canvas2d.height = window.innerHeight;
+            ctx.clearRect(0, 0, canvas2d.width, canvas2d.height);
+            
+            if (!results.landmarks || results.landmarks.length === 0) return;
+
+            const landmarks = results.landmarks[0];
+            
+            // 连接线
+            ctx.strokeStyle = '#00ffff';
+            ctx.lineWidth = 3;
+            ctx.shadowColor = '#00ffff';
+            ctx.shadowBlur = 10;
+            
+            const connections = [
+                [0,1],[1,2],[2,3],[3,4],
+                [0,5],[5,6],[6,7],[7,8],
+                [5,9],[9,10],[10,11],[11,12],
+                [9,13],[13,14],[14,15],[15,16],
+                [13,17],[17,18],[18,19],[19,20],
+                [0,17]
+            ];
+            
+            connections.forEach(([start, end]) => {
+                const s = landmarks[start];
+                const e = landmarks[end];
+                ctx.beginPath();
+                ctx.moveTo((1 - s.x) * canvas2d.width, s.y * canvas2d.height);
+                ctx.lineTo((1 - e.x) * canvas2d.width, e.y * canvas2d.height);
+                ctx.stroke();
+            });
+            
+            // 关键点
+            ctx.fillStyle = '#00ffff';
+            landmarks.forEach(point => {
+                ctx.beginPath();
+                ctx.arc((1 - point.x) * canvas2d.width, point.y * canvas2d.height, 3, 0, 2*Math.PI);
+                ctx.fill();
+            });
+
+            // 强调食指和拇指
+            const index = landmarks[8];
+            const thumb = landmarks[4];
+            
+            ctx.fillStyle = '#ff0033';
+            ctx.shadowColor = '#ff0033';
+            ctx.shadowBlur = 15;
+            ctx.beginPath();
+            ctx.arc((1 - index.x) * canvas2d.width, index.y * canvas2d.height, 6, 0, 2*Math.PI);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc((1 - thumb.x) * canvas2d.width, thumb.y * canvas2d.height, 6, 0, 2*Math.PI);
+            ctx.fill();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        init();
+    </script>
+</body>
+</html>

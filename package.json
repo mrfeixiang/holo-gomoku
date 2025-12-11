@@ -1,0 +1,46 @@
+{
+  "name": "holographic-gomoku",
+  "version": "1.0.0",
+  "description": "🎮 Play Gomoku (Five in a Row) with hand gestures in a stunning holographic 3D environment!",
+  "main": "holographic-gomoku-fixed-pro.html",
+  "scripts": {
+    "start": "python -m http.server 8000",
+    "serve": "python3 -m http.server 8000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/holographic-gomoku.git"
+  },
+  "keywords": [
+    "gomoku",
+    "five-in-a-row",
+    "hand-gesture",
+    "mediapipe",
+    "threejs",
+    "3d-game",
+    "holographic",
+    "ai-game",
+    "computer-vision",
+    "webgl",
+    "gesture-recognition",
+    "unreal-bloom",
+    "interactive"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/yourusername/holographic-gomoku/issues"
+  },
+  "homepage": "https://github.com/yourusername/holographic-gomoku#readme",
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "browserslist": [
+    "Chrome >= 90",
+    "Edge >= 90",
+    "Firefox >= 88",
+    "Safari >= 15"
+  ]
+}
