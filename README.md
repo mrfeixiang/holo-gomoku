@@ -1,5 +1,9 @@
 # 🎮 Holographic Gesture Gomoku
 
+**🎯 [Play Now! 立即开始游戏！](https://mrfeixiang.github.io/holo-gomoku/)**
+
+[![Live Demo](https://img.shields.io/badge/demo-online-brightgreen)](https://mrfeixiang.github.io/holo-gomoku/)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Three.js](https://img.shields.io/badge/Three.js-r160-blue.svg)](https://threejs.org/)
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10.3-green.svg)](https://mediapipe.dev/)
